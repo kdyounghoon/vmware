@@ -1,0 +1,299 @@
+apiVersion: v1
+data:
+  filter-kubernetes.conf: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+    [FILTER]
+        Name                  modify
+        Match                 kube.*
+        Copy                  kubernetes k8s
+
+    [FILTER]
+        Name                  nest
+        Match                 kube.*
+        Operation             lift
+        Nested_Under          kubernetes
+  filter-record.conf: |
+    [FILTER]
+        Name                record_modifier
+        Match               *
+        Record tkg_cluster tkc01
+        Record tkg_instance tkc01
+    [FILTER]
+        Name                  nest
+        Match                 kube.*
+        Operation             nest
+        Wildcard              tkg_instance*
+        Nest_Under            tkg
+
+    [FILTER]
+        Name                  nest
+        Match                 kube_systemd.*
+        Operation             nest
+        Wildcard              SYSTEMD*
+        Nest_Under            systemd
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    @INCLUDE input-kubernetes.conf
+    @INCLUDE input-systemd.conf
+    @INCLUDE input-kube-apiserver.conf
+    @INCLUDE input-auditd.conf
+    @INCLUDE filter-kubernetes.conf
+    @INCLUDE filter-record.conf
+    @INCLUDE output-syslog.conf
+  input-auditd.conf: |
+    [INPUT]
+        Name              tail
+        Tag               audit.*
+        Path              /var/log/audit/audit.log
+        Parser            logfmt
+        DB                /var/log/flb_system_audit.db
+        Mem_Buf_Limit     50MB
+        Refresh_Interval  10
+        Skip_Long_Lines   On
+  input-kube-apiserver.conf: |
+    [INPUT]
+        Name              tail
+        Tag               apiserver_audit.*
+        Path              /var/log/kubernetes/kube-apiserver.log 
+        Parser            json
+        DB                /var/log/flb_kube_audit.db
+        Mem_Buf_Limit     50MB
+        Refresh_Interval  10
+        Skip_Long_Lines   On
+  input-kubernetes.conf: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            cri
+        DB                /var/log/flb_kube.db
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+  input-systemd.conf: |
+    [INPUT]
+        Name                systemd
+        Tag                 kube_systemd.*
+        Path                /var/log/journal
+        DB                  /var/log/flb_kube_systemd.db
+        Systemd_Filter      _SYSTEMD_UNIT=kubelet.service
+        Systemd_Filter      _SYSTEMD_UNIT=containerd.service
+        Read_From_Tail      On
+        Strip_Underscores   On
+  output-syslog.conf: |
+    [OUTPUT]
+        Name   syslog
+        Match  kube.*
+        Host   10.213.144.25
+        Port   514
+        Mode   udp
+        Syslog_Format        rfc5424
+        Syslog_Hostname_key  tkg_cluster
+        Syslog_Appname_key   pod_name
+        Syslog_Procid_key    container_name
+        Syslog_Message_key   message
+        Syslog_SD_key        k8s
+        Syslog_SD_key        labels
+        Syslog_SD_key        annotations
+        Syslog_SD_key        tkg
+
+    [OUTPUT]
+        Name   syslog
+        Match  kube_systemd.*
+        Host   10.213.144.25
+        Port   514
+        Mode   udp
+        Syslog_Format        rfc5424
+        Syslog_Hostname_key  tkg_cluster
+        Syslog_Appname_key   tkg_instance
+        Syslog_Message_key   MESSAGE
+        Syslog_SD_key        systemd
+  parsers.conf: |
+    [PARSER]
+        Name   apache
+        Format regex
+        Regex  ^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^\"]*?)(?: +\S*)?)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+
+    [PARSER]
+        Name   apache2
+        Format regex
+        Regex  ^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+
+    [PARSER]
+        Name   apache_error
+        Format regex
+        Regex  ^\[[^ ]* (?<time>[^\]]*)\] \[(?<level>[^\]]*)\](?: \[pid (?<pid>[^\]]*)\])?( \[client (?<client>[^\]]*)\])? (?<message>.*)$
+
+    [PARSER]
+        Name   nginx
+        Format regex
+        Regex ^(?<remote>[^ ]*) (?<host>[^ ]*) (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^\"]*?)(?: +\S*)?)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+
+    [PARSER]
+        Name   json
+        Format json
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        Name        docker-daemon
+        Format      regex
+        Regex       time="(?<time>[^ ]*)" level=(?<level>[^ ]*) msg="(?<msg>[^ ].*)"
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        # http://rubular.com/r/tjUt3Awgg4
+        Name cri
+        Format regex
+        Regex ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<message>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+
+    [PARSER]
+        Name        logfmt
+        Format      logfmt
+
+    [PARSER]
+        Name        syslog-rfc5424
+        Format      regex
+        Regex       ^\<(?<pri>[0-9]{1,5})\>1 (?<time>[^ ]+) (?<host>[^ ]+) (?<ident>[^ ]+) (?<pid>[-0-9]+) (?<msgid>[^ ]+) (?<extradata>(\[(.*)\]|-)) (?<message>.+)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        Name        syslog-rfc3164-local
+        Format      regex
+        Regex       ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key    time
+        Time_Format %b %d %H:%M:%S
+        Time_Keep   On
+
+    [PARSER]
+        Name        syslog-rfc3164
+        Format      regex
+        Regex       /^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$/
+        Time_Key    time
+        Time_Format %b %d %H:%M:%S
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        Name    kube-custom
+        Format  regex
+        Regex   (?<tag>[^.]+)?\.?(?<pod_name>[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_(?<namespace_name>[^_]+)_(?<container_name>.+)-(?<docker_id>[a-z0-9]{64})\.log$
+kind: ConfigMap
+metadata:
+  annotations:
+    kapp.k14s.io/identity: v1;tanzu-system-logging//ConfigMap/fluent-bit-config;v1
+    kapp.k14s.io/original: '{"apiVersion":"v1","data":{"filter-kubernetes.conf":"[FILTER]\n    Name                kubernetes\n    Match               kube.*\n    Kube_URL            https://kubernetes.default.svc:443\n    Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n    Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token\n    Kube_Tag_Prefix     kube.var.log.containers.\n    Merge_Log           On\n    Merge_Log_Key       log_processed\n    K8S-Logging.Parser  On\n    K8S-Logging.Exclude
+      Off\n[FILTER]\n    Name                  modify\n    Match                 kube.*\n    Copy                  kubernetes
+      k8s\n\n[FILTER]\n    Name                  nest\n    Match                 kube.*\n    Operation             lift\n    Nested_Under          kubernetes\n","filter-record.conf":"[FILTER]\n    Name                record_modifier\n    Match               *\n    Record
+      tkg_cluster tkc01\n    Record tkg_instance tkc01\n[FILTER]\n    Name                  nest\n    Match                 kube.*\n    Operation             nest\n    Wildcard              tkg_instance*\n    Nest_Under            tkg\n\n[FILTER]\n    Name                  nest\n    Match                 kube_systemd.*\n    Operation             nest\n    Wildcard              SYSTEMD*\n    Nest_Under            systemd\n","fluent-bit.conf":"[SERVICE]\n    Flush         1\n    Log_Level     info\n    Daemon        off\n    Parsers_File  parsers.conf\n    HTTP_Server   On\n    HTTP_Listen   0.0.0.0\n    HTTP_Port     2020\n\n@INCLUDE
+      input-kubernetes.conf\n@INCLUDE input-systemd.conf\n@INCLUDE input-kube-apiserver.conf\n@INCLUDE
+      input-auditd.conf\n@INCLUDE filter-kubernetes.conf\n@INCLUDE filter-record.conf\n@INCLUDE
+      output-syslog.conf\n","input-auditd.conf":"[INPUT]\n    Name              tail\n    Tag               audit.*\n    Path              /var/log/audit/audit.log\n    Parser            logfmt\n    DB                /var/log/flb_system_audit.db\n    Mem_Buf_Limit     50MB\n    Refresh_Interval  10\n    Skip_Long_Lines   On\n","input-kube-apiserver.conf":"[INPUT]\n    Name              tail\n    Tag               apiserver_audit.*\n    Path              /var/log/kubernetes/audit.log\n    Parser            json\n    DB                /var/log/flb_kube_audit.db\n    Mem_Buf_Limit     50MB\n    Refresh_Interval  10\n    Skip_Long_Lines   On\n","input-kubernetes.conf":"[INPUT]\n    Name              tail\n    Tag               kube.*\n    Path              /var/log/containers/*.log\n    Parser            cri\n    DB                /var/log/flb_kube.db\n    Mem_Buf_Limit     50MB\n    Skip_Long_Lines   On\n    Refresh_Interval  10\n","input-systemd.conf":"[INPUT]\n    Name                systemd\n    Tag                 kube_systemd.*\n    Path                /var/log/journal\n    DB                  /var/log/flb_kube_systemd.db\n    Systemd_Filter      _SYSTEMD_UNIT=kubelet.service\n    Systemd_Filter      _SYSTEMD_UNIT=containerd.service\n    Read_From_Tail      On\n    Strip_Underscores   On\n","output-syslog.conf":"[OUTPUT]\n    Name   syslog\n    Match  kube.*\n    Host   10.213.144.25\n    Port   514\n    Mode   udp\n    Syslog_Format        rfc5424\n    Syslog_Hostname_key  tkg_cluster\n    Syslog_Appname_key   pod_name\n    Syslog_Procid_key    container_name\n    Syslog_Message_key   message\n    Syslog_SD_key        k8s\n    Syslog_SD_key        labels\n    Syslog_SD_key        annotations\n    Syslog_SD_key        tkg\n\n[OUTPUT]\n    Name   syslog\n    Match  kube_systemd.*\n    Host   10.213.144.25\n    Port   514\n    Mode   udp\n    Syslog_Format        rfc5424\n    Syslog_Hostname_key  tkg_cluster\n    Syslog_Appname_key   tkg_instance\n    Syslog_Message_key   MESSAGE\n    Syslog_SD_key        systemd\n","parsers.conf":"[PARSER]\n    Name   apache\n    Format
+      regex\n    Regex  ^(?\u003chost\u003e[^ ]*) [^ ]* (?\u003cuser\u003e[^ ]*) \\[(?\u003ctime\u003e[^\\]]*)\\]
+      \"(?\u003cmethod\u003e\\S+)(?: +(?\u003cpath\u003e[^\\\"]*?)(?: +\\S*)?)?\"
+      (?\u003ccode\u003e[^ ]*) (?\u003csize\u003e[^ ]*)(?: \"(?\u003creferer\u003e[^\\\"]*)\"
+      \"(?\u003cagent\u003e[^\\\"]*)\")?$\n    Time_Key time\n    Time_Format %d/%b/%Y:%H:%M:%S
+      %z\n\n[PARSER]\n    Name   apache2\n    Format regex\n    Regex  ^(?\u003chost\u003e[^
+      ]*) [^ ]* (?\u003cuser\u003e[^ ]*) \\[(?\u003ctime\u003e[^\\]]*)\\] \"(?\u003cmethod\u003e\\S+)(?:
+      +(?\u003cpath\u003e[^ ]*) +\\S*)?\" (?\u003ccode\u003e[^ ]*) (?\u003csize\u003e[^
+      ]*)(?: \"(?\u003creferer\u003e[^\\\"]*)\" \"(?\u003cagent\u003e[^\\\"]*)\")?$\n    Time_Key
+      time\n    Time_Format %d/%b/%Y:%H:%M:%S %z\n\n[PARSER]\n    Name   apache_error\n    Format
+      regex\n    Regex  ^\\[[^ ]* (?\u003ctime\u003e[^\\]]*)\\] \\[(?\u003clevel\u003e[^\\]]*)\\](?:
+      \\[pid (?\u003cpid\u003e[^\\]]*)\\])?( \\[client (?\u003cclient\u003e[^\\]]*)\\])?
+      (?\u003cmessage\u003e.*)$\n\n[PARSER]\n    Name   nginx\n    Format regex\n    Regex
+      ^(?\u003cremote\u003e[^ ]*) (?\u003chost\u003e[^ ]*) (?\u003cuser\u003e[^ ]*)
+      \\[(?\u003ctime\u003e[^\\]]*)\\] \"(?\u003cmethod\u003e\\S+)(?: +(?\u003cpath\u003e[^\\\"]*?)(?:
+      +\\S*)?)?\" (?\u003ccode\u003e[^ ]*) (?\u003csize\u003e[^ ]*)(?: \"(?\u003creferer\u003e[^\\\"]*)\"
+      \"(?\u003cagent\u003e[^\\\"]*)\")?$\n    Time_Key time\n    Time_Format %d/%b/%Y:%H:%M:%S
+      %z\n\n[PARSER]\n    Name   json\n    Format json\n    Time_Key time\n    Time_Format
+      %d/%b/%Y:%H:%M:%S %z\n\n[PARSER]\n    Name        docker\n    Format      json\n    Time_Key    time\n    Time_Format
+      %Y-%m-%dT%H:%M:%S.%L\n    Time_Keep   On\n\n[PARSER]\n    Name        docker-daemon\n    Format      regex\n    Regex       time=\"(?\u003ctime\u003e[^
+      ]*)\" level=(?\u003clevel\u003e[^ ]*) msg=\"(?\u003cmsg\u003e[^ ].*)\"\n    Time_Key    time\n    Time_Format
+      %Y-%m-%dT%H:%M:%S.%L\n    Time_Keep   On\n\n[PARSER]\n    # http://rubular.com/r/tjUt3Awgg4\n    Name
+      cri\n    Format regex\n    Regex ^(?\u003ctime\u003e[^ ]+) (?\u003cstream\u003estdout|stderr)
+      (?\u003clogtag\u003e[^ ]*) (?\u003cmessage\u003e.*)$\n    Time_Key    time\n    Time_Format
+      %Y-%m-%dT%H:%M:%S.%L%z\n\n[PARSER]\n    Name        logfmt\n    Format      logfmt\n\n[PARSER]\n    Name        syslog-rfc5424\n    Format      regex\n    Regex       ^\\\u003c(?\u003cpri\u003e[0-9]{1,5})\\\u003e1
+      (?\u003ctime\u003e[^ ]+) (?\u003chost\u003e[^ ]+) (?\u003cident\u003e[^ ]+)
+      (?\u003cpid\u003e[-0-9]+) (?\u003cmsgid\u003e[^ ]+) (?\u003cextradata\u003e(\\[(.*)\\]|-))
+      (?\u003cmessage\u003e.+)$\n    Time_Key    time\n    Time_Format %Y-%m-%dT%H:%M:%S.%L\n    Time_Keep   On\n\n[PARSER]\n    Name        syslog-rfc3164-local\n    Format      regex\n    Regex       ^\\\u003c(?\u003cpri\u003e[0-9]+)\\\u003e(?\u003ctime\u003e[^
+      ]* {1,2}[^ ]* [^ ]*) (?\u003cident\u003e[a-zA-Z0-9_\\/\\.\\-]*)(?:\\[(?\u003cpid\u003e[0-9]+)\\])?(?:[^\\:]*\\:)?
+      *(?\u003cmessage\u003e.*)$\n    Time_Key    time\n    Time_Format %b %d %H:%M:%S\n    Time_Keep   On\n\n[PARSER]\n    Name        syslog-rfc3164\n    Format      regex\n    Regex       /^\\\u003c(?\u003cpri\u003e[0-9]+)\\\u003e(?\u003ctime\u003e[^
+      ]* {1,2}[^ ]* [^ ]*) (?\u003chost\u003e[^ ]*) (?\u003cident\u003e[a-zA-Z0-9_\\/\\.\\-]*)(?:\\[(?\u003cpid\u003e[0-9]+)\\])?(?:[^\\:]*\\:)?
+      *(?\u003cmessage\u003e.*)$/\n    Time_Key    time\n    Time_Format %b %d %H:%M:%S\n    Time_Format
+      %Y-%m-%dT%H:%M:%S.%L\n    Time_Keep   On\n\n[PARSER]\n    Name    kube-custom\n    Format  regex\n    Regex   (?\u003ctag\u003e[^.]+)?\\.?(?\u003cpod_name\u003e[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_(?\u003cnamespace_name\u003e[^_]+)_(?\u003ccontainer_name\u003e.+)-(?\u003cdocker_id\u003e[a-z0-9]{64})\\.log$\n"},"kind":"ConfigMap","metadata":{"labels":{"k8s-app":"fluent-bit","kapp.k14s.io/app":"1638787069513007287","kapp.k14s.io/association":"v1.1eef7be45479a3b8c126212f0855b047"},"name":"fluent-bit-config","namespace":"tanzu-system-logging"}}'
+    kapp.k14s.io/original-diff-md5: c6e94dc94aed3401b5d0f26ed6c0bff3
+  creationTimestamp: "2021-12-06T10:37:50Z"
+  labels:
+    k8s-app: fluent-bit
+    kapp.k14s.io/app: "1638787069513007287"
+    kapp.k14s.io/association: v1.1eef7be45479a3b8c126212f0855b047
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:filter-kubernetes.conf: {}
+        f:filter-record.conf: {}
+        f:fluent-bit.conf: {}
+        f:input-auditd.conf: {}
+        f:input-kube-apiserver.conf: {}
+        f:input-kubernetes.conf: {}
+        f:input-systemd.conf: {}
+        f:output-syslog.conf: {}
+        f:parsers.conf: {}
+      f:metadata:
+        f:annotations:
+          .: {}
+          f:kapp.k14s.io/identity: {}
+          f:kapp.k14s.io/original: {}
+          f:kapp.k14s.io/original-diff-md5: {}
+        f:labels:
+          .: {}
+          f:k8s-app: {}
+          f:kapp.k14s.io/app: {}
+          f:kapp.k14s.io/association: {}
+    manager: kapp
+    operation: Update
+    time: "2021-12-06T10:37:50Z"
+  name: fluent-bit-config
+  namespace: tanzu-system-logging
+  resourceVersion: "1933691"
+  uid: aaacfc34-c72f-4020-81fe-b0b34b2a88b7
